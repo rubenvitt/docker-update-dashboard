@@ -8,4 +8,9 @@ services:
       - ${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock
     environment:
       - CHECK_INTERVAL=300
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
     restart: unless-stopped
