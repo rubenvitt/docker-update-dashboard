@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Docker Update Dashboard</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect x='10' y='45' width='35' height='30' rx='3' fill='%2358a6ff'/><rect x='55' y='45' width='35' height='30' rx='3' fill='%2358a6ff'/><rect x='10' y='10' width='35' height='30' rx='3' fill='%2358a6ff'/><rect x='55' y='10' width='35' height='30' rx='3' fill='%2358a6ff'/><path d='M0 82 Q50 65 100 82 L100 95 Q50 78 0 95Z' fill='%2358a6ff'/></svg>">
+    <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+    <header class="header">
+        <div class="header-left">
+            <div class="logo">
+                <svg width="36" height="36" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <rect x="5" y="30" width="18" height="16" rx="2" fill="#58a6ff" opacity="0.6"/>
+                    <rect x="27" y="30" width="18" height="16" rx="2" fill="#58a6ff" opacity="0.8"/>
+                    <rect x="49" y="30" width="18" height="16" rx="2" fill="#58a6ff"/>
+                    <rect x="27" y="10" width="18" height="16" rx="2" fill="#58a6ff" opacity="0.7"/>
+                    <rect x="49" y="10" width="18" height="16" rx="2" fill="#58a6ff" opacity="0.9"/>
+                    <path d="M0 52 C10 50 20 49 30 48.5 C40 48 50 48 60 48.5 C70 49 80 50 90 51 C95 51.5 100 52 100 52 C100 58 95 65 85 70 C75 75 60 78 50 78 C40 78 25 75 15 70 C5 65 0 58 0 52Z" fill="#58a6ff"/>
+                </svg>
+            </div>
+            <h1 class="title">Docker Update Dashboard</h1>
+        </div>
+        <div class="header-right">
+            <span class="last-check" id="lastCheck">Letzte Prüfung: –</span>
+            <div class="auto-refresh-indicator" id="autoRefreshIndicator">
+                <svg class="countdown-ring" width="28" height="28" viewBox="0 0 28 28">
+                    <circle cx="14" cy="14" r="12" fill="none" stroke="#30363d" stroke-width="2"/>
+                    <circle id="countdownCircle" cx="14" cy="14" r="12" fill="none" stroke="#58a6ff" stroke-width="2" stroke-dasharray="75.4" stroke-dashoffset="0" stroke-linecap="round" transform="rotate(-90 14 14)"/>
+                </svg>
+                <span class="countdown-text" id="countdownText">60</span>
+            </div>
+            <button class="btn-update-all hidden" id="updateAllBtn" title="Alle Container mit Updates aktualisieren">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+                </svg>
+                Alle aktualisieren
+            </button>
+            <button class="btn-refresh" id="refreshBtn" title="Cache leeren &amp; neu laden">
+                <svg class="refresh-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <polyline points="23 4 23 10 17 10"/>
+                    <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+                </svg>
+                Aktualisieren
+            </button>
+        </div>
+    </header>
+
+    <main class="main">
+        <section class="summary" id="summary">
+            <div class="summary-card">
+                <div class="summary-icon total">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <rect x="2" y="7" width="20" height="14" rx="2" ry="2"/><path d="M16 7V4a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v3"/>
+                    </svg>
+                </div>
+                <div class="summary-info">
+                    <span class="summary-value" id="totalCount">–</span>
+                    <span class="summary-label">Container</span>
+                </div>
+            </div>
+            <div class="summary-card updates">
+                <div class="summary-icon updates">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+                    </svg>
+                </div>
+                <div class="summary-info">
+                    <span class="summary-value" id="updatesCount">–</span>
+                    <span class="summary-label">Updates verfügbar</span>
+                </div>
+            </div>
+            <div class="summary-card current">
+                <div class="summary-icon current">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/>
+                    </svg>
+                </div>
+                <div class="summary-info">
+                    <span class="summary-value" id="currentCount">–</span>
+                    <span class="summary-label">Aktuell</span>
+                </div>
+            </div>
+            <div class="summary-card errors">
+                <div class="summary-icon errors">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/>
+                    </svg>
+                </div>
+                <div class="summary-info">
+                    <span class="summary-value" id="errorsCount">–</span>
+                    <span class="summary-label">Fehler</span>
+                </div>
+            </div>
+        </section>
+
+        <section class="container-list" id="containerList">
+            <!-- Container cards werden via JS eingefügt -->
+        </section>
+
+        <div class="loading-state" id="loadingState">
+            <div class="spinner"></div>
+            <p>Container werden geprüft…</p>
+        </div>
+
+        <div class="empty-state hidden" id="emptyState">
+            <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="#30363d" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="2" y="7" width="20" height="14" rx="2" ry="2"/><path d="M16 7V4a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v3"/>
+            </svg>
+            <p>Keine Container gefunden</p>
+            <span class="empty-hint">Stelle sicher, dass Docker läuft und der Socket gemountet ist.</span>
+        </div>
+
+        <div class="error-state hidden" id="errorState">
+            <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="#f85149" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+            </svg>
+            <p id="errorMessage">Verbindung zum Server fehlgeschlagen</p>
+            <span class="error-hint">Prüfe ob der Server läuft und erreichbar ist.</span>
+            <button class="btn-retry" id="retryBtn">Erneut versuchen</button>
+        </div>
+    </main>
+
+    <!-- Log Modal -->
+    <div class="log-modal hidden" id="logModal">
+        <div class="log-modal-backdrop" id="logModalBackdrop"></div>
+        <div class="log-modal-content">
+            <div class="log-modal-header">
+                <div class="log-modal-title">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>
+                    </svg>
+                    <span id="logModalTitle">Update</span>
+                </div>
+                <button class="log-modal-close" id="logModalClose">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+                    </svg>
+                </button>
+            </div>
+            <div class="log-modal-progress">
+                <div class="log-modal-progress-bar" id="logProgressBar"></div>
+            </div>
+            <div class="log-modal-body" id="logModalBody"></div>
+            <div class="log-modal-footer hidden" id="logModalFooter">
+                <button class="btn-log-close" id="logModalCloseBtn">Schließen</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/app.js"></script>
+</body>
+</html>
