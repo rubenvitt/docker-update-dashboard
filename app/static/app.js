@@ -117,6 +117,10 @@
             case 'complete':
                 addLogEntry(event.success ? 'success' : 'error', event.message);
                 setProgressState(event.success ? 'success' : 'error');
+                if (event.reload) {
+                    addLogEntry('info', 'Seite wird in 5 Sekunden neu geladen…');
+                    setTimeout(() => window.location.reload(), 5000);
+                }
                 break;
             case 'all_complete':
                 addLogEntry(event.success ? 'success' : 'error', event.message);

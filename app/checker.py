@@ -1,4 +1,5 @@
 import asyncio
+import socket
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -26,6 +27,7 @@ class DockerUpdateChecker:
         self.client = docker.from_env()
         self.check_interval = check_interval
         self._cache: dict[str, CacheEntry] = {}
+        self._hostname = socket.gethostname()
 
     def clear_cache(self):
         self._cache.clear()
@@ -248,6 +250,109 @@ class DockerUpdateChecker:
         })
         return info
 
+    def _is_self(self, container) -> bool:
+        """Check if the given container is the dashboard itself."""
+        return (
+            container.id.startswith(self._hostname)
+            or self._hostname.startswith(container.short_id)
+        )
+
+    def _extract_run_config(self, container) -> tuple[dict, dict]:
+        """Extract run kwargs and extra networks from a container."""
+        attrs = container.attrs
+        host_config = attrs.get("HostConfig", {})
+        config = attrs.get("Config", {})
+        network_settings = attrs.get("NetworkSettings", {})
+
+        run_kwargs = {
+            "name": container.name,
+            "detach": True,
+            "environment": config.get("Env") or [],
+            "labels": config.get("Labels") or {},
+        }
+
+        cmd = config.get("Cmd")
+        if cmd:
+            run_kwargs["command"] = cmd
+        entrypoint = config.get("Entrypoint")
+        if entrypoint:
+            run_kwargs["entrypoint"] = entrypoint
+        working_dir = config.get("WorkingDir")
+        if working_dir:
+            run_kwargs["working_dir"] = working_dir
+        user = config.get("User")
+        if user:
+            run_kwargs["user"] = user
+        restart_policy = host_config.get("RestartPolicy")
+        if restart_policy and restart_policy.get("Name"):
+            run_kwargs["restart_policy"] = restart_policy
+        port_bindings = host_config.get("PortBindings")
+        if port_bindings:
+            run_kwargs["ports"] = port_bindings
+        binds = host_config.get("Binds")
+        if binds:
+            run_kwargs["volumes"] = binds
+        network_mode = host_config.get("NetworkMode")
+        if network_mode:
+            run_kwargs["network_mode"] = network_mode
+        if host_config.get("Privileged"):
+            run_kwargs["privileged"] = True
+        hostname = config.get("Hostname")
+        if hostname and hostname != container.short_id:
+            run_kwargs["hostname"] = hostname
+
+        extra_networks = {}
+        networks = network_settings.get("Networks") or {}
+        for net_name, net_conf in networks.items():
+            if net_name == network_mode or net_name == "bridge":
+                continue
+            extra_networks[net_name] = {
+                k: net_conf.get(k)
+                for k in ("IPAMConfig", "Aliases")
+                if net_conf.get(k)
+            }
+
+        return run_kwargs, extra_networks
+
+    def _pull_image_stream(self, image_name: str):
+        """Generator that yields pull progress events."""
+        if ":" in image_name:
+            repo, tag = image_name.rsplit(":", 1)
+        else:
+            repo, tag = image_name, "latest"
+
+        yield {"type": "log", "message": f"Image wird heruntergeladen: {image_name}"}
+
+        pull_output = self.client.api.pull(repo, tag=tag, stream=True, decode=True)
+        for chunk in pull_output:
+            status = chunk.get("status", "")
+            layer_id = chunk.get("id", "")
+            if not status:
+                continue
+            if status in ("Downloading", "Extracting", "Verifying Checksum",
+                          "Waiting", "Pulling fs layer"):
+                continue
+            if layer_id and status in ("Pull complete", "Already exists"):
+                yield {"type": "pull_progress", "message": f"{layer_id[:12]}: {status}"}
+            elif status.startswith("Digest:"):
+                yield {"type": "pull_progress", "message": status}
+            elif status.startswith("Status:"):
+                yield {"type": "log", "message": status, "icon": "success"}
+
+    def _reconnect_networks(self, new_container, extra_networks: dict):
+        """Generator that yields log events while reconnecting networks."""
+        for net_name, net_opts in extra_networks.items():
+            yield {"type": "log", "message": f"Netzwerk wird verbunden: {net_name}"}
+            try:
+                network = self.client.networks.get(net_name)
+                connect_kwargs = {}
+                if net_opts.get("Aliases"):
+                    connect_kwargs["aliases"] = net_opts["Aliases"]
+                network.connect(new_container, **connect_kwargs)
+                yield {"type": "log", "message": f"Netzwerk verbunden: {net_name}", "icon": "success"}
+            except Exception as e:
+                yield {"type": "log", "message": f"Netzwerk-Fehler ({net_name}): {e}", "icon": "error"}
+
     def update_container_stream(self, container_id: str):
         """Generator that yields SSE log events while updating a container."""
         try:
@@ -257,128 +362,108 @@ class DockerUpdateChecker:
             return
 
         container_name = container.name
+
+        if self._is_self(container):
+            yield {"type": "log", "message": f"Self-Update erkannt: {container_name}"}
+            yield from self._self_update_stream(container)
+            return
+
         yield {"type": "log", "message": f"Container gefunden: {container_name}"}
 
         try:
-            # 1) Determine image reference
             image_name = self._resolve_image_name(container)
             if not image_name:
                 yield {"type": "complete", "success": False, "message": "Kein Image-Tag verfügbar"}
                 return
 
-            if ":" in image_name:
-                repo, tag = image_name.rsplit(":", 1)
-            else:
-                repo, tag = image_name, "latest"
+            # Pull
+            yield from self._pull_image_stream(image_name)
 
-            # 2) Pull newest image (streaming)
-            yield {"type": "log", "message": f"Image wird heruntergeladen: {image_name}"}
-
-            pull_output = self.client.api.pull(repo, tag=tag, stream=True, decode=True)
-            for chunk in pull_output:
-                status = chunk.get("status", "")
-                layer_id = chunk.get("id", "")
-                if not status:
-                    continue
-                # Skip noisy intermediate statuses
-                if status in ("Downloading", "Extracting", "Verifying Checksum",
-                              "Waiting", "Pulling fs layer"):
-                    continue
-                if layer_id and status in ("Pull complete", "Already exists"):
-                    short_id = layer_id[:12]
-                    yield {"type": "pull_progress", "message": f"{short_id}: {status}"}
-                elif status.startswith("Digest:"):
-                    yield {"type": "pull_progress", "message": status}
-                elif status.startswith("Status:"):
-                    yield {"type": "log", "message": status, "icon": "success"}
-
-            # 3) Extract container config
+            # Extract config
             yield {"type": "log", "message": "Konfiguration wird gesichert…"}
-            attrs = container.attrs
-            host_config = attrs.get("HostConfig", {})
-            config = attrs.get("Config", {})
-            network_settings = attrs.get("NetworkSettings", {})
+            run_kwargs, extra_networks = self._extract_run_config(container)
 
-            run_kwargs = {
-                "name": container_name,
-                "detach": True,
-                "environment": config.get("Env") or [],
-                "labels": config.get("Labels") or {},
-            }
-
-            cmd = config.get("Cmd")
-            if cmd:
-                run_kwargs["command"] = cmd
-            entrypoint = config.get("Entrypoint")
-            if entrypoint:
-                run_kwargs["entrypoint"] = entrypoint
-            working_dir = config.get("WorkingDir")
-            if working_dir:
-                run_kwargs["working_dir"] = working_dir
-            user = config.get("User")
-            if user:
-                run_kwargs["user"] = user
-            restart_policy = host_config.get("RestartPolicy")
-            if restart_policy and restart_policy.get("Name"):
-                run_kwargs["restart_policy"] = restart_policy
-            port_bindings = host_config.get("PortBindings")
-            if port_bindings:
-                run_kwargs["ports"] = port_bindings
-            binds = host_config.get("Binds")
-            if binds:
-                run_kwargs["volumes"] = binds
-            network_mode = host_config.get("NetworkMode")
-            if network_mode:
-                run_kwargs["network_mode"] = network_mode
-            if host_config.get("Privileged"):
-                run_kwargs["privileged"] = True
-            hostname = config.get("Hostname")
-            if hostname and hostname != container.short_id:
-                run_kwargs["hostname"] = hostname
-
-            extra_networks = {}
-            networks = network_settings.get("Networks") or {}
-            for net_name, net_conf in networks.items():
-                if net_name == network_mode or net_name == "bridge":
-                    continue
-                extra_networks[net_name] = {
-                    k: net_conf.get(k)
-                    for k in ("IPAMConfig", "Aliases")
-                    if net_conf.get(k)
-                }
-
-            # 4) Stop container
+            # Stop & remove
             yield {"type": "log", "message": "Container wird gestoppt…"}
             container.stop(timeout=30)
             yield {"type": "log", "message": "Container gestoppt", "icon": "success"}
 
-            # 5) Remove container
             yield {"type": "log", "message": "Container wird entfernt…"}
             container.remove()
             yield {"type": "log", "message": "Container entfernt", "icon": "success"}
 
-            # 6) Create & start new container
+            # Create new
             yield {"type": "log", "message": "Neuer Container wird erstellt…"}
             new_container = self.client.containers.run(image_name, **run_kwargs)
             yield {"type": "log", "message": f"Container gestartet: {new_container.short_id}", "icon": "success"}
 
-            # 7) Reconnect extra networks
-            for net_name, net_opts in extra_networks.items():
-                yield {"type": "log", "message": f"Netzwerk wird verbunden: {net_name}"}
-                try:
-                    network = self.client.networks.get(net_name)
-                    connect_kwargs = {}
-                    if net_opts.get("Aliases"):
-                        connect_kwargs["aliases"] = net_opts["Aliases"]
-                    network.connect(new_container, **connect_kwargs)
-                    yield {"type": "log", "message": f"Netzwerk verbunden: {net_name}", "icon": "success"}
-                except Exception as e:
-                    yield {"type": "log", "message": f"Netzwerk-Fehler ({net_name}): {e}", "icon": "error"}
+            # Networks
+            yield from self._reconnect_networks(new_container, extra_networks)
 
-            # 8) Clear cache
             self._cache.pop(image_name, None)
-
             yield {"type": "complete", "success": True, "message": "Update erfolgreich abgeschlossen"}
+
+        except Exception as e:
+            yield {"type": "complete", "success": False, "message": str(e)}
+
+    def _self_update_stream(self, container):
+        """Handle self-update: rename old, start new, spawn cleanup."""
+        container_name = container.name
+        old_id = container.id
+
+        try:
+            image_name = self._resolve_image_name(container)
+            if not image_name:
+                yield {"type": "complete", "success": False, "message": "Kein Image-Tag verfügbar"}
+                return
+
+            # Pull new image
+            yield from self._pull_image_stream(image_name)
+
+            # Extract config
+            yield {"type": "log", "message": "Konfiguration wird gesichert…"}
+            run_kwargs, extra_networks = self._extract_run_config(container)
+
+            # Rename current container to free up the name
+            temp_name = f"{container_name}-old"
+            yield {"type": "log", "message": f"Container wird umbenannt: {container_name} → {temp_name}"}
+            container.rename(temp_name)
+            yield {"type": "log", "message": "Container umbenannt", "icon": "success"}
+
+            # Create + start new container with the original name
+            yield {"type": "log", "message": "Neuer Container wird erstellt…"}
+            new_container = self.client.containers.run(image_name, **run_kwargs)
+            yield {"type": "log", "message": f"Neuer Container gestartet: {new_container.short_id}", "icon": "success"}
+
+            # Reconnect extra networks on the new container
+            yield from self._reconnect_networks(new_container, extra_networks)
+
+            # Spawn a fire-and-forget cleanup container that stops + removes the old one
+            yield {"type": "log", "message": "Cleanup wird gestartet…"}
+            cleanup_script = (
+                "import docker, time; "
+                "time.sleep(5); "
+                f"c = docker.from_env().containers.get('{old_id}'); "
+                "c.stop(timeout=30); "
+                "c.remove()"
+            )
+            self.client.containers.run(
+                image_name,
+                command=["python", "-c", cleanup_script],
+                volumes={"/var/run/docker.sock": {"bind": "/var/run/docker.sock"}},
+                detach=True,
+                auto_remove=True,
+                name=f"{container_name}-cleanup",
+            )
+            yield {"type": "log", "message": "Alter Container wird in 5s entfernt", "icon": "success"}
+
+            self._cache.pop(image_name, None)
+            yield {
+                "type": "complete",
+                "success": True,
+                "message": "Self-Update abgeschlossen – Seite wird neu geladen",
+                "reload": True,
+            }
 
         except Exception as e:
             yield {"type": "complete", "success": False, "message": str(e)}
